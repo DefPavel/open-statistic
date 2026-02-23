@@ -1,0 +1,32 @@
+services:
+  open-statistic:
+    build: .
+    container_name: open-statistic
+    ports:
+      - "${PORT:-8080}:${PORT:-8080}"
+    volumes:
+      - openstat-data:/app/data
+      # Для боевого сервера: ${OPENVPN_STATUS_DIR:-./data/openvpn-status}:/var/log/openvpn:ro
+      - ${OPENVPN_STATUS_DIR:-./data/openvpn-status}:/var/log/openvpn:ro
+    command:
+      - ./openstat
+      - -addr=:${PORT:-8080}
+      - -db=${DB_PATH:-/app/data/openstat.db}
+      - -status=${STATUS_PATH:-/var/log/openvpn/status.log}
+      - -interval=${INTERVAL:-60s}
+      - -retention=${RETENTION:-1000}
+    environment:
+      - PORT=${PORT:-8080}
+      - DB_PATH=${DB_PATH:-/app/data/openstat.db}
+      - STATUS_PATH=${STATUS_PATH:-/var/log/openvpn/status.log}
+      - INTERVAL=${INTERVAL:-60s}
+      - RETENTION=${RETENTION:-1000}
+      - API_KEY=${API_KEY:-}
+      - ALLOWED_PATHS=${ALLOWED_PATHS:-/var/log/openvpn}
+    mem_limit: ${MEMORY_LIMIT:-256M}
+    mem_reservation: ${MEMORY_RESERVATION:-64M}
+    cpus: ${CPU_LIMIT:-0.5}
+    restart: unless-stopped
+
+volumes:
+  openstat-data:
