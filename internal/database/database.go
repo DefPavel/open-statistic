@@ -52,6 +52,20 @@ func (db *DB) migrate() error {
 		snapshot_at DATETIME NOT NULL,
 		FOREIGN KEY (user_id) REFERENCES users(id)
 	);
+	CREATE TABLE IF NOT EXISTS user_traffic_totals (
+		user_id INTEGER PRIMARY KEY,
+		bytes_received BIGINT NOT NULL DEFAULT 0,
+		bytes_sent BIGINT NOT NULL DEFAULT 0,
+		FOREIGN KEY (user_id) REFERENCES users(id)
+	);
+	CREATE TABLE IF NOT EXISTS session_last_bytes (
+		user_id INTEGER NOT NULL,
+		real_address TEXT NOT NULL,
+		bytes_received BIGINT NOT NULL,
+		bytes_sent BIGINT NOT NULL,
+		PRIMARY KEY (user_id, real_address),
+		FOREIGN KEY (user_id) REFERENCES users(id)
+	);
 	CREATE INDEX IF NOT EXISTS idx_traffic_snapshot_at ON traffic_snapshots(snapshot_at);
 	CREATE INDEX IF NOT EXISTS idx_traffic_user ON traffic_snapshots(user_id);
 	CREATE UNIQUE INDEX IF NOT EXISTS idx_users_common_name ON users(common_name);
@@ -60,7 +74,7 @@ func (db *DB) migrate() error {
 	return err
 }
 
-// SaveSnapshot сохраняет снимок статистики из status-файла
+// SaveSnapshot сохраняет снимок и обновляет накопленный трафик
 func (db *DB) SaveSnapshot(status *parser.Status) error {
 	tx, err := db.conn.Begin()
 	if err != nil {
@@ -72,6 +86,8 @@ func (db *DB) SaveSnapshot(status *parser.Status) error {
 	if snapshotAt.IsZero() {
 		snapshotAt = time.Now().UTC()
 	}
+
+	currentSessions := make(map[sessionKey]sessionBytes)
 
 	insert, err := tx.Prepare(`INSERT INTO traffic_snapshots (user_id, real_address, virtual_address, bytes_received, bytes_sent, connected_since, snapshot_at) VALUES (?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
@@ -87,8 +103,57 @@ func (db *DB) SaveSnapshot(status *parser.Status) error {
 		if _, err := insert.Exec(userID, c.RealAddress, c.VirtualAddr, c.BytesReceived, c.BytesSent, c.ConnectedSince, snapshotAt); err != nil {
 			return err
 		}
+		currentSessions[sessionKey{userID, c.RealAddress}] = sessionBytes{r: c.BytesReceived, s: c.BytesSent}
 	}
+
+	// Обновить накопленный трафик (deltas)
+	db.updateTrafficTotals(tx, currentSessions)
+
 	return tx.Commit()
+}
+
+type sessionKey struct {
+	uid  int64
+	addr string
+}
+
+type sessionBytes struct {
+	r, s int64
+}
+
+func (db *DB) updateTrafficTotals(tx *sql.Tx, cur map[sessionKey]sessionBytes) {
+	rows, _ := tx.Query("SELECT user_id, real_address, bytes_received, bytes_sent FROM session_last_bytes")
+	if rows != nil {
+		defer rows.Close()
+		for rows.Next() {
+			var uid int64
+			var addr string
+			var lr, ls int64
+			if rows.Scan(&uid, &addr, &lr, &ls) != nil {
+				continue
+			}
+			k := sessionKey{uid, addr}
+			if cr, ok := cur[k]; ok {
+				dr := cr.r - lr
+				ds := cr.s - ls
+				if dr < 0 {
+					dr = cr.r
+					ds = cr.s
+				}
+				if dr > 0 || ds > 0 {
+					tx.Exec("INSERT INTO user_traffic_totals (user_id, bytes_received, bytes_sent) VALUES (?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET bytes_received=bytes_received+excluded.bytes_received, bytes_sent=bytes_sent+excluded.bytes_sent", uid, dr, ds)
+				}
+			} else {
+				tx.Exec("INSERT INTO user_traffic_totals (user_id, bytes_received, bytes_sent) VALUES (?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET bytes_received=bytes_received+excluded.bytes_received, bytes_sent=bytes_sent+excluded.bytes_sent", uid, lr, ls)
+				tx.Exec("DELETE FROM session_last_bytes WHERE user_id=? AND real_address=?", uid, addr)
+			}
+		}
+	}
+
+	tx.Exec("DELETE FROM session_last_bytes")
+	for k, v := range cur {
+		tx.Exec("INSERT INTO session_last_bytes (user_id, real_address, bytes_received, bytes_sent) VALUES (?, ?, ?, ?)", k.uid, k.addr, v.r, v.s)
+	}
 }
 
 func (db *DB) ensureUser(tx *sql.Tx, commonName string) (int64, error) {
@@ -218,6 +283,73 @@ func (db *DB) GetLatestSnapshot() ([]parser.Client, error) {
 		clients = append(clients, c)
 	}
 	return clients, rows.Err()
+}
+
+// GetTotalTraffic возвращает накопленный (всего за всё время) трафик пользователя
+func (db *DB) GetTotalTraffic(commonName string) (*UserTraffic, error) {
+	var ut UserTraffic
+	err := db.conn.QueryRow(`
+		SELECT u.common_name, COALESCE(t.bytes_received, 0), COALESCE(t.bytes_sent, 0)
+		FROM users u
+		LEFT JOIN user_traffic_totals t ON u.id = t.user_id
+		WHERE u.common_name = ?`, commonName).Scan(&ut.CommonName, &ut.BytesReceived, &ut.BytesSent)
+	if err != nil {
+		return nil, err
+	}
+	ut.TotalBytes = ut.BytesReceived + ut.BytesSent
+	return &ut, nil
+}
+
+// GetTotalTrafficAll возвращает накопленный трафик всех пользователей
+func (db *DB) GetTotalTrafficAll() ([]UserTraffic, error) {
+	rows, err := db.conn.Query(`
+		SELECT u.common_name, COALESCE(t.bytes_received, 0), COALESCE(t.bytes_sent, 0)
+		FROM users u
+		LEFT JOIN user_traffic_totals t ON u.id = t.user_id
+		ORDER BY (COALESCE(t.bytes_received, 0) + COALESCE(t.bytes_sent, 0)) DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	result := make([]UserTraffic, 0, 32)
+	for rows.Next() {
+		var ut UserTraffic
+		if err := rows.Scan(&ut.CommonName, &ut.BytesReceived, &ut.BytesSent); err != nil {
+			return nil, err
+		}
+		ut.TotalBytes = ut.BytesReceived + ut.BytesSent
+		result = append(result, ut)
+	}
+	return result, rows.Err()
+}
+
+// Stats сводная статистика
+type Stats struct {
+	ConnectedCount int   `json:"connected_count"`
+	TotalUsers     int   `json:"total_users"`
+	SessionBytesR  int64 `json:"session_bytes_received"`  // трафик в текущих сессиях
+	SessionBytesS  int64 `json:"session_bytes_sent"`
+	TotalBytesR    int64 `json:"total_bytes_received"`    // накопленный трафик
+	TotalBytesS    int64 `json:"total_bytes_sent"`
+}
+
+// GetStats возвращает сводную статистику
+func (db *DB) GetStats() (*Stats, error) {
+	var s Stats
+	err := db.conn.QueryRow("SELECT COUNT(*) FROM users").Scan(&s.TotalUsers)
+	if err != nil {
+		return nil, err
+	}
+	err = db.conn.QueryRow(`SELECT COUNT(*), COALESCE(SUM(bytes_received),0), COALESCE(SUM(bytes_sent),0)
+		FROM traffic_snapshots WHERE snapshot_at = (` + maxSnapshotQuery + `)`).Scan(&s.ConnectedCount, &s.SessionBytesR, &s.SessionBytesS)
+	if err != nil {
+		return nil, err
+	}
+	err = db.conn.QueryRow("SELECT COALESCE(SUM(bytes_received),0), COALESCE(SUM(bytes_sent),0) FROM user_traffic_totals").Scan(&s.TotalBytesR, &s.TotalBytesS)
+	if err != nil {
+		return nil, err
+	}
+	return &s, nil
 }
 
 // CleanupOldSnapshots удаляет старые снимки, оставляя последние n

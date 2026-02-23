@@ -59,6 +59,15 @@ func (h *Handler) GetUserTraffic(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	if c.Query("human") == "1" {
+		c.JSON(http.StatusOK, gin.H{
+			"common_name":     traffic.CommonName,
+			"bytes_received": FormatBytes(traffic.BytesReceived),
+			"bytes_sent":     FormatBytes(traffic.BytesSent),
+			"total_bytes":    FormatBytes(traffic.TotalBytes),
+		})
+		return
+	}
 	c.JSON(http.StatusOK, traffic)
 }
 
@@ -72,6 +81,19 @@ func (h *Handler) GetAllTraffic(c *gin.Context) {
 	traffic, err := h.db.GetAllTraffic()
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if c.Query("human") == "1" {
+		out := make([]gin.H, 0, len(traffic))
+		for _, t := range traffic {
+			out = append(out, gin.H{
+				"common_name":    t.CommonName,
+				"bytes_received": FormatBytes(t.BytesReceived),
+				"bytes_sent":     FormatBytes(t.BytesSent),
+				"total_bytes":    FormatBytes(t.TotalBytes),
+			})
+		}
+		c.JSON(http.StatusOK, gin.H{"traffic": out})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"traffic": traffic})
@@ -90,6 +112,76 @@ func (h *Handler) GetConnected(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"clients": clients})
+}
+
+// GetStats godoc
+func (h *Handler) GetStats(c *gin.Context) {
+	stats, err := h.db.GetStats()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if c.Query("human") == "1" {
+		c.JSON(http.StatusOK, gin.H{
+			"connected_count":         stats.ConnectedCount,
+			"total_users":             stats.TotalUsers,
+			"session_bytes_received":  FormatBytes(stats.SessionBytesR),
+			"session_bytes_sent":      FormatBytes(stats.SessionBytesS),
+			"session_bytes_total":     FormatBytes(stats.SessionBytesR + stats.SessionBytesS),
+			"total_bytes_received":   FormatBytes(stats.TotalBytesR),
+			"total_bytes_sent":       FormatBytes(stats.TotalBytesS),
+			"total_bytes_all":         FormatBytes(stats.TotalBytesR + stats.TotalBytesS),
+		})
+		return
+	}
+	c.JSON(http.StatusOK, stats)
+}
+
+// GetUserTotal godoc
+func (h *Handler) GetUserTotal(c *gin.Context) {
+	name := c.Param("name")
+	if name == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "имя пользователя обязательно"})
+		return
+	}
+	traffic, err := h.db.GetTotalTraffic(name)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if c.Query("human") == "1" {
+		c.JSON(http.StatusOK, gin.H{
+			"common_name":     traffic.CommonName,
+			"bytes_received": FormatBytes(traffic.BytesReceived),
+			"bytes_sent":     FormatBytes(traffic.BytesSent),
+			"total_bytes":    FormatBytes(traffic.TotalBytes),
+		})
+		return
+	}
+	c.JSON(http.StatusOK, traffic)
+}
+
+// GetTotalTraffic godoc
+func (h *Handler) GetTotalTraffic(c *gin.Context) {
+	traffic, err := h.db.GetTotalTrafficAll()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if c.Query("human") == "1" {
+		out := make([]gin.H, 0, len(traffic))
+		for _, t := range traffic {
+			out = append(out, gin.H{
+				"common_name":     t.CommonName,
+				"bytes_received":  FormatBytes(t.BytesReceived),
+				"bytes_sent":      FormatBytes(t.BytesSent),
+				"total_bytes":     FormatBytes(t.TotalBytes),
+			})
+		}
+		c.JSON(http.StatusOK, gin.H{"traffic": out})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"traffic": traffic})
 }
 
 // CollectNow godoc

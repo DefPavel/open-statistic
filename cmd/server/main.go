@@ -129,9 +129,12 @@ func main() {
 	r.Use(api.APIKeyAuth(apiKey))
 
 	r.GET("/health", func(c *gin.Context) { c.JSON(http.StatusOK, gin.H{"status": "ok"}) })
+	r.GET("/stats", h.GetStats)
 	r.GET("/users", h.GetUsers)
 	r.GET("/users/:name/traffic", h.GetUserTraffic)
+	r.GET("/users/:name/total", h.GetUserTotal)
 	r.GET("/traffic", h.GetAllTraffic)
+	r.GET("/traffic/total", h.GetTotalTraffic)
 	r.GET("/connected", h.GetConnected)
 	r.POST("/collect", h.CollectNow)
 
