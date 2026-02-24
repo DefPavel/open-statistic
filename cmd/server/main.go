@@ -136,6 +136,8 @@ func main() {
 	r.GET("/traffic", h.GetAllTraffic)
 	r.GET("/traffic/total", h.GetTotalTraffic)
 	r.GET("/connected", h.GetConnected)
+	r.GET("/aliases", h.GetAliases)
+	r.PUT("/aliases", h.SetAlias)
 	r.POST("/collect", h.CollectNow)
 
 	srv := &http.Server{

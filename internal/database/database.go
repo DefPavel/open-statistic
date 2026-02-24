@@ -69,9 +69,22 @@ func (db *DB) migrate() error {
 	CREATE INDEX IF NOT EXISTS idx_traffic_snapshot_at ON traffic_snapshots(snapshot_at);
 	CREATE INDEX IF NOT EXISTS idx_traffic_user ON traffic_snapshots(user_id);
 	CREATE UNIQUE INDEX IF NOT EXISTS idx_users_common_name ON users(common_name);
+	CREATE TABLE IF NOT EXISTS user_aliases (
+		common_name TEXT NOT NULL,
+		real_address TEXT NOT NULL DEFAULT '',
+		alias TEXT NOT NULL,
+		PRIMARY KEY (common_name, real_address)
+	);
 	`
-	_, err := db.conn.Exec(schema)
-	return err
+	if _, err := db.conn.Exec(schema); err != nil {
+		return err
+	}
+	// Удаляем некорректные пользователи (undefined, null, пустые), если есть
+	db.conn.Exec(`DELETE FROM session_last_bytes WHERE user_id IN (SELECT id FROM users WHERE TRIM(common_name) = '' OR LOWER(TRIM(common_name)) IN ('undefined','null'))`)
+	db.conn.Exec(`DELETE FROM user_traffic_totals WHERE user_id IN (SELECT id FROM users WHERE TRIM(common_name) = '' OR LOWER(TRIM(common_name)) IN ('undefined','null'))`)
+	db.conn.Exec(`DELETE FROM traffic_snapshots WHERE user_id IN (SELECT id FROM users WHERE TRIM(common_name) = '' OR LOWER(TRIM(common_name)) IN ('undefined','null'))`)
+	db.conn.Exec(`DELETE FROM users WHERE TRIM(common_name) = '' OR LOWER(TRIM(common_name)) IN ('undefined','null')`)
+	return nil
 }
 
 // SaveSnapshot сохраняет снимок и обновляет накопленный трафик
@@ -96,6 +109,9 @@ func (db *DB) SaveSnapshot(status *parser.Status) error {
 	defer insert.Close()
 
 	for _, c := range status.Clients {
+		if !isValidUserName(c.CommonName) {
+			continue // пропускаем undefined, null, пустые
+		}
 		userID, err := db.ensureUser(tx, c.CommonName)
 		if err != nil {
 			return err
@@ -156,6 +172,10 @@ func (db *DB) updateTrafficTotals(tx *sql.Tx, cur map[sessionKey]sessionBytes) {
 	}
 }
 
+func isValidUserName(name string) bool {
+	return name != "" && name != "undefined" && name != "null"
+}
+
 func (db *DB) ensureUser(tx *sql.Tx, commonName string) (int64, error) {
 	db.userCacheMu.RLock()
 	if id, ok := db.userCache[commonName]; ok {
@@ -199,7 +219,7 @@ type UserTraffic struct {
 
 var maxSnapshotQuery = `SELECT MAX(snapshot_at) FROM traffic_snapshots`
 
-// GetUsers возвращает список пользователей
+// GetUsers возвращает список пользователей (без undefined, null, пустых)
 func (db *DB) GetUsers() ([]string, error) {
 	rows, err := db.conn.Query("SELECT common_name FROM users ORDER BY common_name")
 	if err != nil {
@@ -213,7 +233,9 @@ func (db *DB) GetUsers() ([]string, error) {
 		if err := rows.Scan(&name); err != nil {
 			return nil, err
 		}
-		users = append(users, name)
+		if isValidUserName(name) {
+			users = append(users, name)
+		}
 	}
 	return users, rows.Err()
 }
@@ -253,6 +275,70 @@ func (db *DB) GetAllTraffic() ([]UserTraffic, error) {
 		}
 		ut.TotalBytes = ut.BytesReceived + ut.BytesSent
 		result = append(result, ut)
+	}
+	return result, rows.Err()
+}
+
+// GetAlias возвращает читаемое имя: сначала для (common_name, real_address), иначе для (common_name, "")
+func (db *DB) GetAlias(commonName, realAddress string) string {
+	var alias string
+	if err := db.conn.QueryRow("SELECT alias FROM user_aliases WHERE common_name=? AND real_address=?", commonName, realAddress).Scan(&alias); err == nil && alias != "" {
+		return alias
+	}
+	if err := db.conn.QueryRow("SELECT alias FROM user_aliases WHERE common_name=? AND real_address=''", commonName).Scan(&alias); err == nil && alias != "" {
+		return alias
+	}
+	return ""
+}
+
+// LoadAllAliases возвращает карту "common_name" или "common_name|real_address" -> alias для быстрого поиска
+func (db *DB) LoadAllAliases() map[string]string {
+	rows, err := db.conn.Query("SELECT common_name, real_address, alias FROM user_aliases WHERE alias != ''")
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	m := make(map[string]string)
+	for rows.Next() {
+		var cn, addr, alias string
+		if rows.Scan(&cn, &addr, &alias) == nil {
+			if addr != "" {
+				m[cn+"|"+addr] = alias
+			} else {
+				m[cn] = alias
+			}
+		}
+	}
+	return m
+}
+
+// SetAlias устанавливает алиас. real_address="" — для всех подключений пользователя. alias="" — удалить
+func (db *DB) SetAlias(commonName, realAddress, alias string) error {
+	if alias == "" {
+		_, err := db.conn.Exec("DELETE FROM user_aliases WHERE common_name=? AND real_address=?", commonName, realAddress)
+		return err
+	}
+	_, err := db.conn.Exec(`
+		INSERT INTO user_aliases (common_name, real_address, alias) VALUES (?, ?, ?)
+		ON CONFLICT(common_name, real_address) DO UPDATE SET alias=excluded.alias`,
+		commonName, realAddress, alias)
+	return err
+}
+
+// GetAllAliases возвращает все алиасы для API
+func (db *DB) GetAllAliases() ([]struct{ CommonName, RealAddress, Alias string }, error) {
+	rows, err := db.conn.Query("SELECT common_name, real_address, alias FROM user_aliases ORDER BY common_name, real_address")
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var result []struct{ CommonName, RealAddress, Alias string }
+	for rows.Next() {
+		var r struct{ CommonName, RealAddress, Alias string }
+		if err := rows.Scan(&r.CommonName, &r.RealAddress, &r.Alias); err != nil {
+			continue
+		}
+		result = append(result, r)
 	}
 	return result, rows.Err()
 }

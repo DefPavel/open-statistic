@@ -87,7 +87,7 @@ func ParseBytes(data []byte) (*Status, error) {
 
 			if clientColumns != nil && !bytes.HasPrefix(line, []byte("GLOBAL STATS")) {
 				c := parseClientLine(lineStr, clientColumns)
-				if c.CommonName != "" {
+				if isValidCommonName(c.CommonName) {
 					s.Clients = append(s.Clients, c)
 				}
 			}
@@ -110,6 +110,14 @@ func ParseBytes(data []byte) (*Status, error) {
 // Parse — алиас для совместимости
 func Parse(content string) (*Status, error) {
 	return ParseBytes([]byte(content))
+}
+
+func isValidCommonName(name string) bool {
+	if name == "" {
+		return false
+	}
+	s := strings.ToLower(strings.TrimSpace(name))
+	return s != "undefined" && s != "null"
 }
 
 func parseColumns(line string) []string {

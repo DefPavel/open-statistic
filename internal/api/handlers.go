@@ -83,20 +83,33 @@ func (h *Handler) GetAllTraffic(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	aliases := h.db.LoadAllAliases()
 	if c.Query("human") == "1" {
 		out := make([]gin.H, 0, len(traffic))
 		for _, t := range traffic {
-			out = append(out, gin.H{
+			item := gin.H{
 				"common_name":    t.CommonName,
 				"bytes_received": FormatBytes(t.BytesReceived),
 				"bytes_sent":     FormatBytes(t.BytesSent),
 				"total_bytes":    FormatBytes(t.TotalBytes),
-			})
+			}
+			if a, ok := aliases[t.CommonName]; ok {
+				item["alias"] = a
+			}
+			out = append(out, item)
 		}
 		c.JSON(http.StatusOK, gin.H{"traffic": out})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"traffic": traffic})
+	out := make([]gin.H, 0, len(traffic))
+	for _, t := range traffic {
+		item := gin.H{"common_name": t.CommonName, "bytes_received": t.BytesReceived, "bytes_sent": t.BytesSent, "total_bytes": t.TotalBytes}
+		if a, ok := aliases[t.CommonName]; ok {
+			item["alias"] = a
+		}
+		out = append(out, item)
+	}
+	c.JSON(http.StatusOK, gin.H{"traffic": out})
 }
 
 // GetConnected godoc
@@ -111,7 +124,25 @@ func (h *Handler) GetConnected(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"clients": clients})
+	aliases := h.db.LoadAllAliases()
+	out := make([]gin.H, 0, len(clients))
+	for _, cl := range clients {
+		item := gin.H{
+			"common_name":     cl.CommonName,
+			"real_address":   cl.RealAddress,
+			"virtual_address": cl.VirtualAddr,
+			"bytes_received":  cl.BytesReceived,
+			"bytes_sent":      cl.BytesSent,
+			"connected_since": cl.ConnectedSince,
+		}
+		if a, ok := aliases[cl.CommonName+"|"+cl.RealAddress]; ok {
+			item["alias"] = a
+		} else if a, ok := aliases[cl.CommonName]; ok {
+			item["alias"] = a
+		}
+		out = append(out, item)
+	}
+	c.JSON(http.StatusOK, gin.H{"clients": out})
 }
 
 // GetStats godoc
@@ -168,20 +199,33 @@ func (h *Handler) GetTotalTraffic(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
 		return
 	}
+	aliases := h.db.LoadAllAliases()
 	if c.Query("human") == "1" {
 		out := make([]gin.H, 0, len(traffic))
 		for _, t := range traffic {
-			out = append(out, gin.H{
+			item := gin.H{
 				"common_name":     t.CommonName,
 				"bytes_received":  FormatBytes(t.BytesReceived),
 				"bytes_sent":      FormatBytes(t.BytesSent),
 				"total_bytes":     FormatBytes(t.TotalBytes),
-			})
+			}
+			if a, ok := aliases[t.CommonName]; ok {
+				item["alias"] = a
+			}
+			out = append(out, item)
 		}
 		c.JSON(http.StatusOK, gin.H{"traffic": out})
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"traffic": traffic})
+	out := make([]gin.H, 0, len(traffic))
+	for _, t := range traffic {
+		item := gin.H{"common_name": t.CommonName, "bytes_received": t.BytesReceived, "bytes_sent": t.BytesSent, "total_bytes": t.TotalBytes}
+		if a, ok := aliases[t.CommonName]; ok {
+			item["alias"] = a
+		}
+		out = append(out, item)
+	}
+	c.JSON(http.StatusOK, gin.H{"traffic": out})
 }
 
 // CollectNow godoc
@@ -220,3 +264,47 @@ func (h *Handler) CollectNow(c *gin.Context) {
 
 // CollectFn вызывается для сбора статистики (инжектируется из main)
 type CollectFn func(statusPath string) error
+
+// GetAliases godoc
+// @Summary Список алиасов (читаемые имена устройств/пользователей)
+// @Tags aliases
+// @Produce json
+// @Router /aliases [get]
+func (h *Handler) GetAliases(c *gin.Context) {
+	list, err := h.db.GetAllAliases()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	out := make([]gin.H, 0, len(list))
+	for _, a := range list {
+		out = append(out, gin.H{"common_name": a.CommonName, "real_address": a.RealAddress, "alias": a.Alias})
+	}
+	c.JSON(http.StatusOK, gin.H{"aliases": out})
+}
+
+// SetAlias godoc
+// @Summary Задать алиас для устройства/пользователя
+// @Tags aliases
+// @Param body body object true "common_name, real_address (опционально), alias"
+// @Router /aliases [put]
+func (h *Handler) SetAlias(c *gin.Context) {
+	var body struct {
+		CommonName  string `json:"common_name"`
+		RealAddress string `json:"real_address"`
+		Alias       string `json:"alias"`
+	}
+	if err := c.ShouldBindJSON(&body); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "invalid body"})
+		return
+	}
+	if body.CommonName == "" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "common_name обязателен"})
+		return
+	}
+	if err := h.db.SetAlias(body.CommonName, body.RealAddress, body.Alias); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"status": "ok"})
+}
