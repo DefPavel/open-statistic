@@ -135,6 +135,7 @@ func main() {
 	r.GET("/users/:name/total", h.GetUserTotal)
 	r.GET("/traffic", h.GetAllTraffic)
 	r.GET("/traffic/total", h.GetTotalTraffic)
+	r.GET("/traffic/daily", h.GetDailyTraffic)
 	r.GET("/connected", h.GetConnected)
 	r.GET("/aliases", h.GetAliases)
 	r.PUT("/aliases", h.SetAlias)

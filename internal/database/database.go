@@ -58,6 +58,11 @@ func (db *DB) migrate() error {
 		bytes_sent BIGINT NOT NULL DEFAULT 0,
 		FOREIGN KEY (user_id) REFERENCES users(id)
 	);
+	CREATE TABLE IF NOT EXISTS daily_traffic_totals (
+		day DATE PRIMARY KEY,
+		bytes_received BIGINT NOT NULL DEFAULT 0,
+		bytes_sent BIGINT NOT NULL DEFAULT 0
+	);
 	CREATE TABLE IF NOT EXISTS session_last_bytes (
 		user_id INTEGER NOT NULL,
 		real_address TEXT NOT NULL,
@@ -123,7 +128,7 @@ func (db *DB) SaveSnapshot(status *parser.Status) error {
 	}
 
 	// Обновить накопленный трафик (deltas)
-	db.updateTrafficTotals(tx, currentSessions)
+	db.updateTrafficTotals(tx, currentSessions, snapshotAt)
 
 	return tx.Commit()
 }
@@ -137,7 +142,9 @@ type sessionBytes struct {
 	r, s int64
 }
 
-func (db *DB) updateTrafficTotals(tx *sql.Tx, cur map[sessionKey]sessionBytes) {
+func (db *DB) updateTrafficTotals(tx *sql.Tx, cur map[sessionKey]sessionBytes, at time.Time) {
+	day := at.UTC().Format("2006-01-02")
+
 	rows, _ := tx.Query("SELECT user_id, real_address, bytes_received, bytes_sent FROM session_last_bytes")
 	if rows != nil {
 		defer rows.Close()
@@ -158,9 +165,11 @@ func (db *DB) updateTrafficTotals(tx *sql.Tx, cur map[sessionKey]sessionBytes) {
 				}
 				if dr > 0 || ds > 0 {
 					tx.Exec("INSERT INTO user_traffic_totals (user_id, bytes_received, bytes_sent) VALUES (?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET bytes_received=bytes_received+excluded.bytes_received, bytes_sent=bytes_sent+excluded.bytes_sent", uid, dr, ds)
+					tx.Exec("INSERT INTO daily_traffic_totals (day, bytes_received, bytes_sent) VALUES (?, ?, ?) ON CONFLICT(day) DO UPDATE SET bytes_received=bytes_received+excluded.bytes_received, bytes_sent=bytes_sent+excluded.bytes_sent", day, dr, ds)
 				}
 			} else {
 				tx.Exec("INSERT INTO user_traffic_totals (user_id, bytes_received, bytes_sent) VALUES (?, ?, ?) ON CONFLICT(user_id) DO UPDATE SET bytes_received=bytes_received+excluded.bytes_received, bytes_sent=bytes_sent+excluded.bytes_sent", uid, lr, ls)
+				tx.Exec("INSERT INTO daily_traffic_totals (day, bytes_received, bytes_sent) VALUES (?, ?, ?) ON CONFLICT(day) DO UPDATE SET bytes_received=bytes_received+excluded.bytes_received, bytes_sent=bytes_sent+excluded.bytes_sent", day, lr, ls)
 				tx.Exec("DELETE FROM session_last_bytes WHERE user_id=? AND real_address=?", uid, addr)
 			}
 		}
@@ -436,6 +445,41 @@ func (db *DB) GetStats() (*Stats, error) {
 		return nil, err
 	}
 	return &s, nil
+}
+
+// DailyTraffic агрегированный трафик по дням (всего по всем пользователям)
+type DailyTraffic struct {
+	Day           string `json:"day"`
+	BytesReceived int64  `json:"bytes_received"`
+	BytesSent     int64  `json:"bytes_sent"`
+	TotalBytes    int64  `json:"total_bytes"`
+}
+
+// GetDailyTraffic возвращает последние N дней агрегированного трафика
+func (db *DB) GetDailyTraffic(limit int) ([]DailyTraffic, error) {
+	if limit <= 0 {
+		limit = 30
+	}
+	rows, err := db.conn.Query(`
+		SELECT day, bytes_received, bytes_sent
+		FROM daily_traffic_totals
+		ORDER BY day DESC
+		LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var result []DailyTraffic
+	for rows.Next() {
+		var d DailyTraffic
+		if err := rows.Scan(&d.Day, &d.BytesReceived, &d.BytesSent); err != nil {
+			return nil, err
+		}
+		d.TotalBytes = d.BytesReceived + d.BytesSent
+		result = append(result, d)
+	}
+	return result, rows.Err()
 }
 
 // CleanupOldSnapshots удаляет старые снимки, оставляя последние n

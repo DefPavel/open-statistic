@@ -168,6 +168,43 @@ func (h *Handler) GetStats(c *gin.Context) {
 	c.JSON(http.StatusOK, stats)
 }
 
+// GetDailyTraffic godoc
+// @Summary Агрегированный трафик по дням (всего по всем пользователям)
+// @Tags traffic
+// @Produce json
+// @Success 200 {array} database.DailyTraffic
+// @Router /traffic/daily [get]
+func (h *Handler) GetDailyTraffic(c *gin.Context) {
+	list, err := h.db.GetDailyTraffic(30)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+	if c.Query("human") == "1" {
+		out := make([]gin.H, 0, len(list))
+		for _, d := range list {
+			out = append(out, gin.H{
+				"day":            d.Day,
+				"bytes_received": FormatBytes(d.BytesReceived),
+				"bytes_sent":     FormatBytes(d.BytesSent),
+				"total_bytes":    FormatBytes(d.TotalBytes),
+			})
+		}
+		c.JSON(http.StatusOK, gin.H{"days": out})
+		return
+	}
+	out := make([]gin.H, 0, len(list))
+	for _, d := range list {
+		out = append(out, gin.H{
+			"day":            d.Day,
+			"bytes_received": d.BytesReceived,
+			"bytes_sent":     d.BytesSent,
+			"total_bytes":    d.TotalBytes,
+		})
+	}
+	c.JSON(http.StatusOK, gin.H{"days": out})
+}
+
 // GetUserTotal godoc
 func (h *Handler) GetUserTotal(c *gin.Context) {
 	name := c.Param("name")
